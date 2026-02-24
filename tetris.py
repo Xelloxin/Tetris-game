@@ -1,54 +1,71 @@
 #!/usr/bin/env python3
 """
-Terminal Tetris - Arrow keys to move/rotate, Q to quit, P to pause.
-Requires: Python 3, curses (built-in on Linux/macOS).
-Windows users: pip install windows-curses
+Tetris - Pygame version
+Install: pip install pygame
+Run:     python tetris_pygame.py
 """
 
-import curses
+import pygame
 import random
-import time
+import sys
 
-# ── Tetromino definitions ─────────────────────────────────────────────────────
-SHAPES = {
-    'I': [[1, 1, 1, 1]],
-    'O': [[1, 1],
-          [1, 1]],
-    'T': [[0, 1, 0],
-          [1, 1, 1]],
-    'S': [[0, 1, 1],
-          [1, 1, 0]],
-    'Z': [[1, 1, 0],
-          [0, 1, 1]],
-    'J': [[1, 0, 0],
-          [1, 1, 1]],
-    'L': [[0, 0, 1],
-          [1, 1, 1]],
-}
+# ── Constants ─────────────────────────────────────────────────────────────────
+CELL = 32
+COLS, ROWS = 10, 20
+SIDEBAR = 200
+
+W = COLS * CELL + SIDEBAR
+H = ROWS * CELL
+
+FPS = 60
+
+BLACK   = (0,   0,   0)
+DARK    = (20,  20,  30)
+GREY    = (40,  40,  55)
+WHITE   = (255, 255, 255)
+GHOST   = (80,  80, 100)
 
 COLORS = {
-    'I': 1, 'O': 2, 'T': 3, 'S': 4, 'Z': 5, 'J': 6, 'L': 7,
+    'I': (0,   220, 220),
+    'O': (240, 220,   0),
+    'T': (180,   0, 220),
+    'S': (0,   200,  60),
+    'Z': (220,  30,  30),
+    'J': (30,   80, 220),
+    'L': (220, 140,   0),
 }
 
-BOARD_W, BOARD_H = 10, 20
+SHAPES = {
+    'I': [[1,1,1,1]],
+    'O': [[1,1],[1,1]],
+    'T': [[0,1,0],[1,1,1]],
+    'S': [[0,1,1],[1,1,0]],
+    'Z': [[1,1,0],[0,1,1]],
+    'J': [[1,0,0],[1,1,1]],
+    'L': [[0,0,1],[1,1,1]],
+}
 
-# ── Helper functions ──────────────────────────────────────────────────────────
+LINE_SCORES = [0, 100, 300, 500, 800]
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
 
 def rotate(shape):
     return [list(row) for row in zip(*shape[::-1])]
 
 def new_piece():
     name = random.choice(list(SHAPES))
-    return {'name': name, 'shape': [row[:] for row in SHAPES[name]],
-            'x': BOARD_W // 2 - len(SHAPES[name][0]) // 2, 'y': 0}
+    shape = [row[:] for row in SHAPES[name]]
+    return {'name': name, 'shape': shape,
+            'x': COLS // 2 - len(shape[0]) // 2, 'y': 0}
 
 def valid(board, piece, dx=0, dy=0, shape=None):
-    s = shape if shape else piece['shape']
+    s = shape or piece['shape']
     for r, row in enumerate(s):
         for c, cell in enumerate(row):
             if cell:
-                nx, ny = piece['x'] + c + dx, piece['y'] + r + dy
-                if nx < 0 or nx >= BOARD_W or ny >= BOARD_H:
+                nx = piece['x'] + c + dx
+                ny = piece['y'] + r + dy
+                if nx < 0 or nx >= COLS or ny >= ROWS:
                     return False
                 if ny >= 0 and board[ny][nx]:
                     return False
@@ -64,182 +81,235 @@ def clear_lines(board):
     full = [r for r, row in enumerate(board) if all(row)]
     for r in full:
         del board[r]
-        board.insert(0, [0] * BOARD_W)
+        board.insert(0, [0] * COLS)
     return len(full)
 
-def level_speed(level):
-    return max(0.05, 0.5 - (level - 1) * 0.04)
+def ghost_y(board, piece):
+    gy = piece['y']
+    while valid(board, {**piece, 'y': gy + 1}):
+        gy += 1
+    return gy
+
+def level_interval(level):
+    """Frames between automatic drops."""
+    return max(2, 48 - (level - 1) * 4)
 
 # ── Drawing ───────────────────────────────────────────────────────────────────
 
-def draw(stdscr, board, piece, next_piece, score, level, lines, paused):
-    stdscr.clear()
-    h, w = stdscr.getmaxyx()
+def draw_cell(surf, x, y, color, alpha=255):
+    rect = pygame.Rect(x * CELL, y * CELL, CELL - 1, CELL - 1)
+    if alpha < 255:
+        s = pygame.Surface((CELL - 1, CELL - 1), pygame.SRCALPHA)
+        s.fill((*color, alpha))
+        surf.blit(s, rect.topleft)
+    else:
+        pygame.draw.rect(surf, color, rect, border_radius=3)
+        highlight = tuple(min(255, v + 60) for v in color)
+        pygame.draw.rect(surf, highlight, rect, width=2, border_radius=3)
 
-    # Build display grid
-    grid = [[board[r][c] for c in range(BOARD_W)] for r in range(BOARD_H)]
+def draw_board(surf, board):
+    # Background grid
+    for r in range(ROWS):
+        for c in range(COLS):
+            pygame.draw.rect(surf, GREY,
+                             (c * CELL, r * CELL, CELL - 1, CELL - 1),
+                             border_radius=2)
+            cell = board[r][c]
+            if cell:
+                draw_cell(surf, c, r, COLORS[cell])
 
-    # Ghost piece
-    ghost = {'name': piece['name'], 'shape': piece['shape'],
-              'x': piece['x'], 'y': piece['y']}
-    while valid(board, ghost, dy=1):
-        ghost['y'] += 1
-    for r, row in enumerate(ghost['shape']):
-        for c, cell in enumerate(row):
-            gy, gx = ghost['y'] + r, ghost['x'] + c
-            if cell and 0 <= gy < BOARD_H and not grid[gy][gx]:
-                grid[gy][gx] = '.'
-
-    # Active piece
+def draw_piece(surf, piece, color=None, gy=None):
+    y_offset = gy if gy is not None else piece['y']
+    col = color or COLORS[piece['name']]
     for r, row in enumerate(piece['shape']):
         for c, cell in enumerate(row):
-            py, px = piece['y'] + r, piece['x'] + c
-            if cell and 0 <= py < BOARD_H:
-                grid[py][px] = piece['name']
+            if cell:
+                draw_cell(surf, piece['x'] + c, y_offset + r, col)
 
-    # Border + board
-    offset_x = max(0, w // 2 - BOARD_W - 2)
-    offset_y = max(0, (h - BOARD_H - 2) // 2)
+def draw_ghost(surf, board, piece):
+    gy = ghost_y(board, piece)
+    if gy == piece['y']:
+        return
+    for r, row in enumerate(piece['shape']):
+        for c, cell in enumerate(row):
+            if cell:
+                rect = pygame.Rect((piece['x'] + c) * CELL,
+                                   (gy + r) * CELL, CELL - 1, CELL - 1)
+                pygame.draw.rect(surf, GHOST, rect, width=2, border_radius=3)
 
-    try:
-        stdscr.addstr(offset_y, offset_x, '┌' + '──' * BOARD_W + '┐')
-        for r in range(BOARD_H):
-            stdscr.addstr(offset_y + 1 + r, offset_x, '│')
-            for c in range(BOARD_W):
-                cell = grid[r][c]
-                if cell and cell != '.':
-                    color = curses.color_pair(COLORS.get(cell, 0))
-                    stdscr.addstr('██', color | curses.A_BOLD)
-                elif cell == '.':
-                    stdscr.addstr('░░', curses.color_pair(0))
-                else:
-                    stdscr.addstr('  ')
-            stdscr.addstr('│')
-        stdscr.addstr(offset_y + BOARD_H + 1, offset_x, '└' + '──' * BOARD_W + '┘')
+def draw_sidebar(surf, font, big_font, next_piece, score, level, lines, paused):
+    ox = COLS * CELL
+    # Background
+    pygame.draw.rect(surf, DARK, (ox, 0, SIDEBAR, H))
+    pygame.draw.line(surf, GREY, (ox, 0), (ox, H), 2)
 
-        # Sidebar
-        sx = offset_x + BOARD_W * 2 + 3
-        sy = offset_y
+    def text(s, x, y, f=font, color=WHITE):
+        surf.blit(f.render(s, True, color), (ox + x, y))
 
-        stdscr.addstr(sy,     sx, 'TETRIS', curses.A_BOLD)
-        stdscr.addstr(sy + 2, sx, f'Score : {score}')
-        stdscr.addstr(sy + 3, sx, f'Level : {level}')
-        stdscr.addstr(sy + 4, sx, f'Lines : {lines}')
+    text('TETRIS', 20, 18, big_font, (0, 220, 220))
 
-        stdscr.addstr(sy + 6, sx, 'NEXT:', curses.A_BOLD)
-        ns = next_piece['shape']
-        for r, row in enumerate(ns):
-            line = ''
-            for cell in row:
-                line += '██' if cell else '  '
-            color = curses.color_pair(COLORS.get(next_piece['name'], 0))
-            stdscr.addstr(sy + 7 + r, sx, line, color | curses.A_BOLD)
+    text(f'SCORE', 20, 80)
+    text(f'{score}', 20, 102, big_font, (240, 220, 0))
 
-        stdscr.addstr(sy + 13, sx, '← → : Move')
-        stdscr.addstr(sy + 14, sx, '↑   : Rotate')
-        stdscr.addstr(sy + 15, sx, '↓   : Soft drop')
-        stdscr.addstr(sy + 16, sx, 'SPC : Hard drop')
-        stdscr.addstr(sy + 17, sx, 'P   : Pause')
-        stdscr.addstr(sy + 18, sx, 'Q   : Quit')
+    text(f'LEVEL', 20, 150)
+    text(f'{level}', 20, 172, big_font, (0, 200, 100))
 
-        if paused:
-            msg = '  PAUSED  '
-            stdscr.addstr(offset_y + BOARD_H // 2,
-                          offset_x + BOARD_W - len(msg) // 2 + 1,
-                          msg, curses.A_REVERSE | curses.A_BOLD)
+    text(f'LINES', 20, 220)
+    text(f'{lines}', 20, 242, big_font, (180, 100, 255))
 
-    except curses.error:
-        pass  # ignore drawing outside terminal bounds
+    text('NEXT', 20, 295)
+    # Draw next piece preview
+    ns = next_piece['shape']
+    pw = len(ns[0]) * CELL
+    start_x = ox + (SIDEBAR - pw) // 2
+    start_y = 325
+    for r, row in enumerate(ns):
+        for c, cell in enumerate(row):
+            if cell:
+                rect = pygame.Rect(start_x + c * CELL, start_y + r * CELL,
+                                   CELL - 1, CELL - 1)
+                color = COLORS[next_piece['name']]
+                pygame.draw.rect(surf, color, rect, border_radius=3)
+                highlight = tuple(min(255, v + 60) for v in color)
+                pygame.draw.rect(surf, highlight, rect, width=2, border_radius=3)
 
-    stdscr.refresh()
+    # Controls
+    controls = [
+        ('← →', 'Move'),
+        ('↑',   'Rotate'),
+        ('↓',   'Soft drop'),
+        ('SPC', 'Hard drop'),
+        ('P',   'Pause'),
+        ('Q',   'Quit'),
+    ]
+    cy = H - 175
+    small = pygame.font.SysFont('consolas', 14)
+    for key, action in controls:
+        k = small.render(key, True, (200, 200, 255))
+        a = small.render(action, True, (160, 160, 160))
+        surf.blit(k, (ox + 15, cy))
+        surf.blit(a, (ox + 70, cy))
+        cy += 22
 
-# ── Main game loop ────────────────────────────────────────────────────────────
+    if paused:
+        s = big_font.render('PAUSED', True, (255, 220, 0))
+        surf.blit(s, (ox + SIDEBAR // 2 - s.get_width() // 2, H // 2 - 20))
 
-def game(stdscr):
-    curses.curs_set(0)
-    stdscr.nodelay(True)
-    stdscr.timeout(50)
+# ── Main ──────────────────────────────────────────────────────────────────────
 
-    # Colors: I=cyan O=yellow T=magenta S=green Z=red J=blue L=white
-    curses.start_color()
-    curses.init_pair(1, curses.COLOR_CYAN,    curses.COLOR_BLACK)
-    curses.init_pair(2, curses.COLOR_YELLOW,  curses.COLOR_BLACK)
-    curses.init_pair(3, curses.COLOR_MAGENTA, curses.COLOR_BLACK)
-    curses.init_pair(4, curses.COLOR_GREEN,   curses.COLOR_BLACK)
-    curses.init_pair(5, curses.COLOR_RED,     curses.COLOR_BLACK)
-    curses.init_pair(6, curses.COLOR_BLUE,    curses.COLOR_BLACK)
-    curses.init_pair(7, curses.COLOR_WHITE,   curses.COLOR_BLACK)
+def show_screen(surf, font, big_font, title, subtitle, color):
+    surf.fill(DARK)
+    t = big_font.render(title, True, color)
+    s = font.render(subtitle, True, WHITE)
+    surf.blit(t, (W // 2 - t.get_width() // 2, H // 2 - 60))
+    surf.blit(s, (W // 2 - s.get_width() // 2, H // 2 + 10))
+    pygame.display.flip()
 
-    board = [[0] * BOARD_W for _ in range(BOARD_H)]
-    piece = new_piece()
-    next_piece = new_piece()
-    score, level, total_lines = 0, 1, 0
-    fall_time = time.time()
-    paused = False
-    line_scores = [0, 100, 300, 500, 800]
+def main():
+    pygame.init()
+    surf = pygame.display.set_mode((W, H))
+    pygame.display.set_caption('Tetris')
+    clock = pygame.time.Clock()
 
-    while True:
-        key = stdscr.getch()
+    font     = pygame.font.SysFont('consolas', 20)
+    big_font = pygame.font.SysFont('consolas', 28, bold=True)
 
-        if key == ord('q') or key == ord('Q'):
-            break
-        if key == ord('p') or key == ord('P'):
-            paused = not paused
+    # ── Start screen ──
+    show_screen(surf, font, big_font, 'TETRIS', 'Press any key to start', (0, 220, 220))
+    waiting = True
+    while waiting:
+        for e in pygame.event.get():
+            if e.type == pygame.QUIT:
+                pygame.quit(); sys.exit()
+            if e.type == pygame.KEYDOWN:
+                waiting = False
 
-        if not paused:
-            if key == curses.KEY_LEFT and valid(board, piece, dx=-1):
-                piece['x'] -= 1
-            elif key == curses.KEY_RIGHT and valid(board, piece, dx=1):
-                piece['x'] += 1
-            elif key == curses.KEY_UP:
-                rotated = rotate(piece['shape'])
-                if valid(board, piece, shape=rotated):
-                    piece['shape'] = rotated
-            elif key == curses.KEY_DOWN:
-                if valid(board, piece, dy=1):
-                    piece['y'] += 1
-                    score += 1
-            elif key == ord(' '):
-                while valid(board, piece, dy=1):
-                    piece['y'] += 1
-                    score += 2
+    while True:  # restart loop
+        board = [[0] * COLS for _ in range(ROWS)]
+        piece = new_piece()
+        next_piece = new_piece()
+        score, level, total_lines = 0, 1, 0
+        fall_timer = 0
+        paused = False
+        game_over = False
+
+        while not game_over:
+            clock.tick(FPS)
+            fall_timer += 1
+
+            for e in pygame.event.get():
+                if e.type == pygame.QUIT:
+                    pygame.quit(); sys.exit()
+                if e.type == pygame.KEYDOWN:
+                    if e.key == pygame.K_q:
+                        pygame.quit(); sys.exit()
+                    if e.key == pygame.K_p:
+                        paused = not paused
+                    if paused:
+                        continue
+                    if e.key == pygame.K_LEFT and valid(board, piece, dx=-1):
+                        piece['x'] -= 1
+                    if e.key == pygame.K_RIGHT and valid(board, piece, dx=1):
+                        piece['x'] += 1
+                    if e.key == pygame.K_UP:
+                        rotated = rotate(piece['shape'])
+                        if valid(board, piece, shape=rotated):
+                            piece['shape'] = rotated
+                    if e.key == pygame.K_DOWN:
+                        if valid(board, piece, dy=1):
+                            piece['y'] += 1
+                            score += 1
+                            fall_timer = 0
+                    if e.key == pygame.K_SPACE:
+                        while valid(board, piece, dy=1):
+                            piece['y'] += 1
+                            score += 2
+                        fall_timer = level_interval(level) + 1  # force lock
+
+            if paused:
+                # Still draw while paused
+                surf.fill(DARK)
+                draw_board(surf, board)
+                draw_ghost(surf, board, piece)
+                draw_piece(surf, piece)
+                draw_sidebar(surf, font, big_font, next_piece, score, level, total_lines, True)
+                pygame.display.flip()
+                continue
 
             # Gravity
-            now = time.time()
-            if now - fall_time >= level_speed(level):
-                fall_time = now
+            if fall_timer >= level_interval(level):
+                fall_timer = 0
                 if valid(board, piece, dy=1):
                     piece['y'] += 1
                 else:
                     lock(board, piece)
                     cleared = clear_lines(board)
                     total_lines += cleared
-                    score += line_scores[cleared] * level
+                    score += LINE_SCORES[cleared] * level
                     level = total_lines // 10 + 1
                     piece = next_piece
                     next_piece = new_piece()
                     if not valid(board, piece):
-                        break  # Game over
+                        game_over = True
 
-        draw(stdscr, board, piece, next_piece, score, level, total_lines, paused)
+            # Draw
+            surf.fill(DARK)
+            draw_board(surf, board)
+            draw_ghost(surf, board, piece)
+            draw_piece(surf, piece)
+            draw_sidebar(surf, font, big_font, next_piece, score, level, total_lines, False)
+            pygame.display.flip()
 
-    # Game over screen
-    stdscr.nodelay(False)
-    h, w = stdscr.getmaxyx()
-    msg = f' GAME OVER  Score: {score} '
-    try:
-        stdscr.addstr(h // 2, max(0, w // 2 - len(msg) // 2), msg,
-                      curses.A_REVERSE | curses.A_BOLD)
-        stdscr.addstr(h // 2 + 1, max(0, w // 2 - 10), ' Press any key to exit ',
-                      curses.A_BOLD)
-    except curses.error:
-        pass
-    stdscr.refresh()
-    stdscr.getch()
-
-
-def main():
-    curses.wrapper(game)
+        # Game over
+        show_screen(surf, font, big_font,
+                    'GAME OVER', f'Score: {score}   Press any key to restart', (220, 50, 50))
+        waiting = True
+        while waiting:
+            for e in pygame.event.get():
+                if e.type == pygame.QUIT:
+                    pygame.quit(); sys.exit()
+                if e.type == pygame.KEYDOWN:
+                    waiting = False
 
 if __name__ == '__main__':
     main()
